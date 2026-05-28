@@ -5,70 +5,74 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
 # ==========================================
-# 1. ПРОКАЧАННЫЙ LEGO-БЛОК (С ДВУМЯ СЛОЯМИ)
+# 1. ПРОКАЧАННЫЙ LEGO-БЛОК
 # ==========================================
 class AdvancedLegoBlock(nn.Module):
     def __init__(self, hidden_dim=8):
         super(AdvancedLegoBlock, self).__init__()
-        
-        # Входной слой блока: расширяет 2 входа (пиксель + память) до hidden_dim
         self.input_layer = nn.Linear(2, hidden_dim)
         self.activation = nn.ReLU()
-        # Выходной слой блока: сжимает hidden_dim обратно в 1 число памяти
         self.output_layer = nn.Linear(hidden_dim, 1)
         
     def forward(self, current_pixel, previous_memory):
-        # Объединяем два входа в один вектор [Батч, 2]
         combined = torch.cat([current_pixel, previous_memory], dim=1)
-        
-        # Прогоняем через внутреннюю структуру кубика LEGO
         x = self.input_layer(combined)
         x = self.activation(x)
-        new_memory = self.output_layer(x)
-        
-        # Возвращаем строго 1 число памяти (активируем его, чтобы не было взрыва чисел)
-        return torch.tanh(new_memory) 
+        return torch.tanh(self.output_layer(x))
 
 # ==========================================
-# 2. ЗЕРКАЛЬНАЯ ЛЕСЕНКА Z-ТОПОЛОГИИ
+# 2. ОПТИМИЗИРОВАННАЯ ЭЛЕГАНТНАЯ Z-ТОПОЛОГИЯ
 # ==========================================
-class HonestZTopology(nn.Module):
-    def __init__(self, input_dim=784, num_classes=10):
-        super(HonestZTopology, self).__init__()
-        self.input_dim = input_dim
+class ElegantZTopology(nn.Module):
+    def __init__(self, input_dim=784, reduced_dim=196, num_classes=10):
+        super(ElegantZTopology, self).__init__()
+        self.reduced_dim = reduced_dim
         
-        # Создаем цепочку из N - 1 прокачанных LEGO блоков
-        self.lego_blocks = nn.ModuleList([AdvancedLegoBlock(hidden_dim=8) for _ in range(input_dim - 1)])
+        # ЭТАП 1: Сжимаем входной слой в 4 раза (с 784 до 196)
+        # Это уберет избыточность и объединит пиксели в локальные группы
+        self.input_compressor = nn.Linear(input_dim, reduced_dim)
+        self.activation = nn.ReLU()
         
-        # Финальный классификатор
-        self.classifier = nn.Linear(input_dim - 1, num_classes)
+        # ЭТАП 2: Лесенка из N - 1 блоков (теперь их всего 195 вместо 783!)
+        self.lego_blocks = nn.ModuleList([AdvancedLegoBlock(hidden_dim=8) for _ in range(reduced_dim - 1)])
+        
+        # ЭТАП 3: Промежуточное сжатие выходов лесенки в 2 раза (со 195 до 96)
+        self.feature_compressor = nn.Linear(reduced_dim - 1, 96)
+        
+        # Финальный классификатор на 10 цифр
+        self.classifier = nn.Linear(96, num_classes)
         
     def forward(self, x):
+        # Распрямляем картинку [Батч, 784]
         x = x.view(x.size(0), -1)
         B = x.size(0)
         
+        # Первичное сжатие входа
+        x_compressed = self.activation(self.input_compressor(x)) # [Батч, 196]
+        
         block_outputs = []
         
-        # У первого блока (в самом конце) ПЕРВЫЙ вход — это пиксель 783,
-        # а ВТОРОЙ вход (вместо памяти) — это соседний пиксель 782, как на вашей схеме!
-        last_pixel = x[:, 783].unsqueeze(1)
-        prev_pixel = x[:, 782].unsqueeze(1)
+        # Инициализируем первый блок с конца сжатого вектора
+        last_val = x_compressed[:, self.reduced_dim - 1].unsqueeze(1)
+        prev_val = x_compressed[:, self.reduced_dim - 2].unsqueeze(1)
         
-        # Запускаем самый первый блок
-        memory = self.lego_blocks[self.input_dim - 2](last_pixel, prev_pixel)
+        memory = self.lego_blocks[self.reduced_dim - 2](last_val, prev_val)
         block_outputs.append(memory)
         
-        # Гоним цепочку памяти назад к началу (от пикселя 781 до 0)
-        for i in range(self.input_dim - 3, -1, -1):
-            current_pixel = x[:, i].unsqueeze(1) # Вход с входного слоя
-            
-            # Блок принимает текущий пиксель и память от предыдущего блока
-            memory = self.lego_blocks[i](current_pixel, memory)
+        # Гоним укороченную цепочку памяти назад
+        for i in range(self.reduced_dim - 3, -1, -1):
+            current_val = x_compressed[:, i].unsqueeze(1)
+            memory = self.lego_blocks[i](current_val, memory)
             block_outputs.append(memory)
             
-        # Собираем все выходы, выравниваем по порядку и отдаем классификатору
+        # Собираем выходы лесенки [Батч, 195]
         ladder_features = torch.cat(block_outputs[::-1], dim=1)
-        return self.classifier(ladder_features)
+        
+        # Уменьшаем размер признаков в два раза
+        reduced_features = self.activation(self.feature_compressor(ladder_features)) # [Батч, 96]
+        
+        # Финальный вердикт
+        return self.classifier(reduced_features)
 
 # ==========================================
 # 3. ЗАПУСК ТЕСТА
@@ -80,13 +84,13 @@ if __name__ == '__main__':
     train_loader = DataLoader(datasets.MNIST('./data', train=True, download=True, transform=transform), batch_size=64, shuffle=True)
     test_loader = DataLoader(datasets.MNIST('./data', train=False, download=True, transform=transform), batch_size=1000, shuffle=False)
 
-    model = HonestZTopology(input_dim=784, num_classes=10).to(device)
+    model = ElegantZTopology(input_dim=784, reduced_dim=196, num_classes=10).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.002)
     criterion = nn.CrossEntropyLoss()
 
-    print("Запущен тест Z-топологии с двухслойными LEGO-блоками...")
+    print("Запущен оптимизированный тест Z-топологии (195 блоков + конусное сжатие)...")
     
-    for epoch in range(1, 4): # Погоняем 3 эпохи, чтобы увидеть динамику
+    for epoch in range(1, 4):
         model.train()
         running_loss = 0.0
         for batch_idx, (data, target) in enumerate(train_loader):
