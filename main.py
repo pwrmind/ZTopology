@@ -4,6 +4,27 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
+class LegoZStep(nn.Module):
+    def __init__(self, in_channels, hidden_size):
+        super(LegoZStep, self).__init__()
+        # Всего две простые линейные трансформации вместо кучи гейтов в GRU!
+        self.pixel_weight = nn.Linear(in_channels, hidden_size)
+        self.memory_weight = nn.Linear(hidden_size, hidden_size)
+        
+        # Функция активации для нелинейности (как ReLU в обычных сетях)
+        self.activation = nn.ReLU()
+        
+    def forward(self, current_pixel, previous_memory):
+        # 1. Пропускаем пиксель через свои веса
+        x_part = self.pixel_weight(current_pixel)
+        # 2. Пропускаем прошлую память через свои веса
+        h_part = self.memory_weight(previous_memory)
+        
+        # 3. Смешиваем их и активируем. Чистая лесенка шириной 2!
+        new_memory = self.activation(x_part + h_part)
+        
+        return new_memory
+
 # ==========================================
 # 1. СЛОЙ ВИНТОВЫХ LEGO-КОЛОДЦЕВ (Z-СЛОЙ)
 # ==========================================
@@ -13,7 +34,10 @@ class SpiralLegoWell(nn.Module):
         self.out_channels = out_channels
         # Порядок движения по спирали: от угла к центру
         self.spiral_indices = [8, 7, 6, 3, 0, 1, 2, 5, 4]
-        self.lego_step = nn.GRUCell(input_size=in_channels, hidden_size=out_channels)
+        # self.lego_step = nn.GRUCell(input_size=in_channels, hidden_size=out_channels)
+        # Ставим ваш собственный чистый блок:
+        self.lego_step = LegoZStep(in_channels=in_channels, hidden_size=out_channels)
+
         
     def forward(self, x):
         B, C, H, W = x.shape
