@@ -11,44 +11,24 @@ class SpiralLegoWell(nn.Module):
     def __init__(self, in_channels=1, out_channels=16):
         super(SpiralLegoWell, self).__init__()
         self.out_channels = out_channels
-        
-        # Индексы обхода матрицы 3x3 по спирали (из угла в центр):
-        # 0 1 2
-        # 3 4 5
-        # 6 7 8
-        # Порядок движения: 8 -> 7 -> 6 -> 3 -> 0 -> 1 -> 2 -> 5 -> 4 (центр)
+        # Порядок движения по спирали: от угла к центру
         self.spiral_indices = [8, 7, 6, 3, 0, 1, 2, 5, 4]
-        
-        # Шаг вашей Z-лесенки: принимает (текущий пиксель + память) -> выдает (новую память)
-        # В качестве математического ядра шага идеально подходит GRU-ячейка
         self.lego_step = nn.GRUCell(input_size=in_channels, hidden_size=out_channels)
         
     def forward(self, x):
-        B, C, H, W = x.shape  # Batch, Channels, Height, Width
-        
-        # Добавляем паддинг, чтобы размер 28x28 стал 30x30 (делится на 3)
+        B, C, H, W = x.shape
         x_padded = torch.nn.functional.pad(x, (1, 1, 1, 1)) 
+        patches = x_padded.unfold(2, 3, 3).unfold(3, 3, 3) 
+        patches = patches.permute(0, 2, 3, 4, 5, 1).flatten(3, 4) 
+        flat_patches = patches.reshape(-1, 9, C) 
         
-        # Нарезаем картинку на неперекрывающиеся окна 3x3 со страйдом 3
-        # Получаем сетку 10x10 колодцев
-        patches = x_padded.unfold(2, 3, 3).unfold(3, 3, 3) # Форма: [B, C, 10, 10, 3, 3]
-        
-        # Перегруппируем тензор под последовательный обход пикселей
-        patches = patches.permute(0, 2, 3, 4, 5, 1).flatten(3, 4) # [B, 10, 10, 9, C]
-        flat_patches = patches.reshape(-1, 9, C) # Объединяем колодцы: [B * 100, 9 пикселей, Каналы]
-        
-        # Инициализируем нулевую память для старта лесенки в каждом колодце
         hx = torch.zeros(flat_patches.size(0), self.out_channels, device=x.device)
         
-        # Крутим винтовую лестницу внутри каждого колодца параллельно по всему батчу!
         for idx in self.spiral_indices:
-            pixel_val = flat_patches[:, idx, :] # Берём текущий пиксель из спирали
-            hx = self.lego_step(pixel_val, hx)  # LEGO-блок смешивает пиксель и память
+            pixel_val = flat_patches[:, idx, :]
+            hx = self.lego_step(pixel_val, hx)  
             
-        # hx теперь содержит сжатую информацию — "выход колодца"
-        # Возвращаем структуру обратно в карту признаков [B, 16 каналов, 10, 10]
         return hx.view(B, 10, 10, self.out_channels).permute(0, 3, 1, 2)
-
 
 # ==========================================
 # 2. СБОРКА ПОЛНОЙ СЕТИ ДЛЯ MNIST
@@ -56,49 +36,83 @@ class SpiralLegoWell(nn.Module):
 class ZTopologyNet(nn.Module):
     def __init__(self):
         super(ZTopologyNet, self).__init__()
-        # Наш кастомный Z-слой из винтовых лестниц
         self.z_layer = SpiralLegoWell(in_channels=1, out_channels=16)
-        
-        # Полносвязный слой («мозг»), принимающий выходы колодцев
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(16 * 10 * 10, 64),
             nn.ReLU(),
-            nn.Linear(64, 10) # 10 классов (цифры от 0 до 9)
+            nn.Linear(64, 10) 
         )
         
     def forward(self, x):
-        x = self.z_layer(x)       # Пропускаем через винтовые колодцы
-        x = self.classifier(x)    # Классифицируем результат
+        x = self.z_layer(x)       
+        x = self.classifier(x)    
         return x
 
-# Настройки
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+# ==========================================
+# 3. ПОДГОТОВКА ДАННЫХ И ОБУЧЕНИЕ
+# ==========================================
+if __name__ == '__main__':
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
 
-# Загрузка датасета MNIST
-train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    # Загружаем тренировочный датасет
+    train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
-# Инициализация модели, оптимизатора и функции потерь
-model = ZTopologyNet().to(device)
-optimizer = optim.Adam(model.parameters(), lr=0.003)
-criterion = nn.CrossEntropyLoss()
+    # ЗАГРУЖАЕМ ТЕСТОВЫЙ ДАТАСЕТ (10 000 картинок)
+    test_dataset = datasets.MNIST('./data', train=False, download=True, transform=transform)
+    test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
-# Короткий цикл обучения (1 эпоха для теста)
-model.train()
-print(f"Обучение запущено на устройстве: {device}")
+    model = ZTopologyNet().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.003)
+    criterion = nn.CrossEntropyLoss()
 
-for batch_idx, (data, target) in enumerate(train_loader):
-    data, target = data.to(device), target.to(device)
-    optimizer.zero_grad()
-    
-    output = model(data)
-    loss = criterion(output, target)
-    loss.backward()
-    optimizer.step()
-    
-    if batch_idx % 200 == 0:
-        print(f"Батч {batch_idx}/{len(train_loader)} | Ошибка (Loss): {loss.item():.4f}")
+    EPOCHS = 5
+    print(f"Запущено полноценное обучение на {EPOCHS} эпох.")
+    print(f"Используемое устройство: {device}\n")
 
-print("Тест завершен! Сеть успешно обучилась на Z-топологии.")
+    for epoch in range(1, EPOCHS + 1):
+        model.train()
+        running_loss = 0.0
+        correct_train = 0
+        total_train = 0
+        
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            _, predicted = torch.max(output.data, 1)
+            total_train += target.size(0)
+            correct_train += (predicted == target).sum().item()
+            
+        train_accuracy = 100 * correct_train / total_train
+        avg_loss = running_loss / len(train_loader)
+        
+        # Блок валидации после каждой эпохи
+        model.eval()
+        correct_test = 0
+        total_test = 0
+        
+        with torch.no_grad():
+            for data, target in test_loader:
+                data, target = data.to(device), target.to(device)
+                outputs = model(data)
+                _, predicted = torch.max(outputs.data, 1)
+                total_test += target.size(0)
+                correct_test += (predicted == target).sum().item()
+                
+        test_accuracy = 100 * correct_test / total_test
+        
+        print(f"--- ЭПОХА {epoch}/{EPOCHS} ---")
+        print(f"Ошибка обучения (Loss): {avg_loss:.4f}")
+        print(f"Точность на тренировке: {train_accuracy:.2f}%")
+        print(f"Точность на ЭКЗАМЕНЕ (Test Accuracy): {test_accuracy:.2f}%\n")
+
+    print("Полноценный цикл обучения Z-топологии завершен!")
